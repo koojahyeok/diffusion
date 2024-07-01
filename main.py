@@ -11,14 +11,18 @@ from score.both import get_inception_and_fid_score
 from torchvision.utils import save_image
 
 from ddpm import DDPMSampler, DDPMTrainer
+from ddim import DDIMSampler, DDIMTrainer
 from model import UNet
 import train
+
+import wandb
 
 def parse_args():
     parser = argparse.ArgumentParser()
     # basic setup
     parser.add_argument('--train', default=True, type=eval, help='train mode or validation model')
     parser.add_argument('--dataset', default='cifar10', type=str, help='choose dataset')
+    parser.add_argument('--model', default='DDPM', type=str, help='choose diffusion basic model')
 
     # UNet setting
     parser.add_argument('--ch', default=128, type=int, help='base channel of UNet')
@@ -46,6 +50,11 @@ def parse_args():
     parser.add_argument('--num_workers', default=4, type=int, help='workers of dataloader')
     parser.add_argument('--ema_decay', default=0.9999, type=float, help="ema decay rate")
     parser.add_argument('--parallel', default=False, type=eval, help='multi gpu training')
+    parser.add_argument('--steps', default=1, type=int, help='set sampling steps in DDIM')
+    parser.add_argument('--method', default='linear', type=str, help='set sampling method')
+    parser.add_argument('--eta', default=0.0, type=float, help='set eta, 0.0 : DDIM, 1.0 : DDPM')
+    parser.add_argument('--only_return_x_0', default=True, type=eval, help='choose save image option')
+    parser.add_argument('--interval', default=1, type=int, help='save image option2')
 
     # Logging & Sampling
     parser.add_argument('--logdir', default='./logs/DDPM_CIFAR10_EPS', type=str, help='log directory')
@@ -106,12 +115,23 @@ def main(args, device):
             T=args.T, ch=args.ch, ch_mult=args.ch_mult, attn=args.attn,
             num_res_blocks=args.num_res_blocks, dropout=args.dropout)
         ema_model = copy.deepcopy(net_model)
-        trainer = DDPMTrainer(
-            net_model, args.beta_1, args.beta_T, args.T).to(device)
-        net_sampler = DDPMSampler(
-            net_model, args.beta_1, args.beta_T, args.T, args.img_size,).to(device)
-        ema_sampler = DDPMSampler(
-            ema_model, args.beta_1, args.beta_T, args.T, args.img_size,).to(device)
+        if args.model == 'DDPM':
+            trainer = DDPMTrainer(
+                net_model, args.beta_1, args.beta_T, args.T).to(device)
+            net_sampler = DDPMSampler(
+                net_model, args.beta_1, args.beta_T, args.T, args.img_size,).to(device)
+            ema_sampler = DDPMSampler(
+                ema_model, args.beta_1, args.beta_T, args.T, args.img_size,).to(device)
+        elif args.model == 'DDIM':
+            trainer = DDIMTrainer(
+                net_model, args.beta_1, args.beta_T, args.T).to(device)
+            net_sampler = DDIMSampler(
+                net_model, args.beta_1, args.beta_T, args.T, args.img_size, args.steps, args.method, args.eta, args.only_return_x_0, args.interval).to(device)
+            ema_sampler = DDIMSampler(
+                ema_model, args.beta_1, args.beta_T, args.T, args.img_size, args.steps, args.method, args.eta, args.only_return_x_0, args.interval).to(device)
+        else:
+            raise NotImplementedError(f"Diffusion model {args.model} is not implemented")
+
         if args.parallel:
             trainer = torch.nn.DataParallel(trainer)
             net_sampler = torch.nn.DataParallel(net_sampler)
@@ -124,8 +144,15 @@ def main(args, device):
         model = UNet(
             T=args.T, ch=args.ch, ch_mult=args.ch_mult, attn=args.attn,
             num_res_blocks=args.num_res_blocks, dropout=args.dropout)
-        sampler = DDPMSampler(
-            model, args.beta_1, args.beta_T, args.T, img_size=args.img_size).to(device)
+        if args.model == 'DDPM':
+            sampler = DDPMSampler(
+                model, args.beta_1, args.beta_T, args.T, args.img_size).to(device)
+        elif args.model == 'DDIM':
+            sampler = DDIMSampler(
+                model, args.beta_1, args.beta_T, args.T, args.img_size, args.steps, args.method, args.eta, args.only_return_x_0, args.interval).to(device)
+        else:
+            raise NotImplementedError(f"Diffusion model {args.model} is not implemented")
+        
         if args.parallel:
             sampler = torch.nn.DataParallel(sampler)
 
@@ -133,7 +160,7 @@ def main(args, device):
         ckpt = torch.load(os.path.join(args.logdir, 'ckpt.pt'))
 
         model.load_state_dict(ckpt['ema_model'])
-        (IS, IS_std), FID, samples = evaluate(sampler, model)
+        (IS, IS_std), FID, samples = evaluate(sampler, model, args, device)
         print("Model(EMA): IS:%6.3f(%.3f), FID:%7.3f" % (IS, IS_std, FID))
         save_image(
             torch.tensor(samples[:256]),
@@ -146,4 +173,18 @@ def main(args, device):
 if __name__ == "__main__":
     args = parse_args()
     device = torch.device(f'cuda:{args.gpu_id}')
+
+    wandb.init(project = "diffusion project")
+    wandb_args = {
+        "epochs": args.T,
+        "dropout" : args.dropout,
+        "lr" : args.lr,
+        "dataset" : args.dataset,
+        "batch_size" : args.batch_size,
+        "num_workers" : args.num_workers,
+    }
+    wandb.run.name = (f'{args.model} with {args.dataset} & sampling steps : {args.T // args.steps}')
+    wandb.run.save()
+
+
     main(args, device)

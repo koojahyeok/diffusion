@@ -8,6 +8,8 @@ from tqdm import trange, tqdm
 from score.both import get_inception_and_fid_score
 import json
 
+import wandb
+
 def ema(source, target, decay):
     source_dict = source.state_dict()
     target_dict = target.state_dict()
@@ -39,7 +41,8 @@ def train(args, net_model, ema_model, trainer, net_sampler, ema_sampler, device,
     optimizer = optim.Adam(net_model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_lr)
 
-    # os.makedirs(os.path.join(args.logdir, 'sample'))
+    if not os.path.exists(os.path.join(args.logdir, 'sample')):
+        os.makedirs(os.path.join(args.logdir, 'sample'))
     x_T = torch.randn(args.sample_size, 3, args.img_size, args.img_size)
     x_T = x_T.to(device)
     grid = (make_grid(next(iter(dl))[0][:args.sample_size]) + 1) / 2
@@ -65,6 +68,7 @@ def train(args, net_model, ema_model, trainer, net_sampler, ema_sampler, device,
         optimizer.step()
         scheduler.step()
         ema(net_model, ema_model, args.ema_decay)
+        wandb.log({"Training loss": loss})
 
         # sample
         if args.sample_step > 0 and step % args.sample_step == 0:
@@ -76,6 +80,9 @@ def train(args, net_model, ema_model, trainer, net_sampler, ema_sampler, device,
                     args.logdir, 'sample', '%d.png' % step)
                 save_image(grid, path)
             net_model.train()
+            wandb.log({
+                'images': wandb.Image(grid)
+            })            
 
         # save
         if args.save_step > 0 and step % args.save_step == 0:
@@ -102,6 +109,8 @@ def train(args, net_model, ema_model, trainer, net_sampler, ema_sampler, device,
                 'FID_EMA': ema_FID
             }
             print(metrics)
+            wandb.log(metrics)
+
 
             with open(os.path.join(args.logdir, 'eval.txt'), 'a') as f:
                 metrics['step'] = step
